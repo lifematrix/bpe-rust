@@ -142,13 +142,13 @@ fn get_pairs_stats_chunk(vocab: &HashMap<String, VocabEntry>, n_jobs: isize) -> 
     let n_jobs = if n_jobs == -1 { num_cpus::get() } else { n_jobs as usize };
 
     // Build a custom thread pool with n_jobs threads
-    // let pool = ThreadPoolBuilder::new().num_threads(n_jobs).build().unwrap();
+    let pool = ThreadPoolBuilder::new().num_threads(n_jobs).build().unwrap();
 
     let start = Instant::now();
     let vocab_values: Vec<&VocabEntry> = vocab.values().collect();
     println!("get vector of vocab values {:?}", start.elapsed());
 
-    let chunk_size = std::cmp::max(vocab_values.len() / n_jobs, 1);
+    let chunk_size = (vocab_values.len()-1)/n_jobs + 1;
     println!("n_jobs: {:?}, len: {:?}, chunk_size: {:?}", n_jobs, vocab_values.len(), chunk_size);
 
     // Create partitions and process each partition in parallel
@@ -248,21 +248,19 @@ fn get_vocab_path() -> PathBuf {
 }
 
 fn main() -> io::Result<()> {
-    let n_jobs = 10 as isize;
-    ThreadPoolBuilder::new().num_threads(n_jobs as usize) // Set the desired number of threads
-        .build_global()
-        .unwrap();
+    // ThreadPoolBuilder::new().num_threads(n_jobs as usize) // Set the desired number of threads
+    //    .build_global()
+    //    .unwrap();
 
     let vocab_path = get_vocab_path();
     println!("vocab path is: {:?}", vocab_path);
 
     let start = Instant::now();
-    let vocab = read_vocab(vocab_path, -1);
+    let vocab = read_vocab(vocab_path, -1)?;
     println!("Execution time of read_vocab: {:?}", start.elapsed());
 
     let start_fn = Instant::now();
-    // let pairs_stats = get_pairs_stats_chunk(&vocab?, n_jobs);
-    let pairs_stats = get_pairs_stats_naive(&vocab?);
+    let pairs_stats = get_pairs_stats_chunk(&vocab, -1);
     println!("Execution time of get_pairs_stats_chunk: {:?}", start_fn.elapsed());
 
     if let Some((best_pair, best_pair_freq)) = pairs_stats.iter().max_by_key(|entry| entry.1) {
