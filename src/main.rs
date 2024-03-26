@@ -182,17 +182,19 @@ fn init_alphabet(vocab: &HashMap<String, VocabEntry>) -> HashMap<String, i32> {
 }
 
 fn merge_and_stats(vocab: &mut HashMap<String, VocabEntry>, 
-                   pairs_stats: Arc<Mutex<HashMap<(String, String), i32>>>, 
+                   pairs_stats: &Arc<Mutex<HashMap<(String, String), i32>>>, 
                    best_pair: &(String, String),
                    n_jobs: isize) {
 
     let new_unit = best_pair.0.clone() + &best_pair.1;
 
+    /*
     {
         let mut ps = pairs_stats.lock().unwrap();
         println!("In merge_and_stats, length: {}", ps.len());
     
     }
+     */
 
     let n_jobs = if n_jobs == -1 { num_cpus::get() } else { n_jobs as usize };
     let pool = ThreadPoolBuilder::new().num_threads(20) // Set the desired number of threads
@@ -209,8 +211,8 @@ fn merge_and_stats(vocab: &mut HashMap<String, VocabEntry>,
                     entry.units.remove(i+1);
 
                     { 
-                        let mut ps = pairs_stats.lock().unwrap();
                         if i>= 1 {
+                            let mut ps = pairs_stats.lock().unwrap();
                             let k1 = (entry.units[i-1].clone(), best_pair.0.clone());
                             // println!("derease key {:?} from stats", k1);
                             *ps.entry(k1.clone()).or_insert(0) -= entry.freq;
@@ -221,6 +223,7 @@ fn merge_and_stats(vocab: &mut HashMap<String, VocabEntry>,
                             *ps.entry(k2).or_insert(0) += entry.freq;
                         }
                         if i < entry.units.len() - 1 {
+                            let mut ps = pairs_stats.lock().unwrap();
                             let k1 = (best_pair.1.clone(), entry.units[i+1].clone());
                             *ps.entry(k1.clone()).or_insert(0) -= entry.freq;
                             // println!("derease key {:?} from stats", k1);
@@ -369,32 +372,51 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
     //let mux_pairs_stats = Arc::new(Mutex::new(pairs_stats));
     //debug!("Execution time of create pairs_stats_mux: {:?}", start.elapsed());
 
-    let mut cur_pairs_stats = pairs_stats.clone();
-    let mut mux_pairs_stats = Arc::new(Mutex::new(HashMap::<(String, String), i32>::new())); 
+    // let mut cur_pairs_stats = pairs_stats.clone();
+    // let mut mux_pairs_stats = Arc::new(Mutex::new(HashMap::<(String, String), i32>::new())); 
+    let mut best_pair: (String, String);
+    let mut best_pair_freq: i32;
+    let mut cur_len: i32;
+    let mux_pairs_stats = Arc::new(Mutex::new(pairs_stats));
 
+    let loop_start = Instant::now();
     for i in 0..n_rounds {
         // bar.inc(1);
+        debug!("{}", "-".repeat(80));
         let start = Instant::now();
-        debug!("#{} the length of cur_pairs_stats: {}", i, cur_pairs_stats.len());
-    
-        let cur_pairs_stats_cloned = cur_pairs_stats.clone();
-        let Some((best_pair, best_pair_freq)) = cur_pairs_stats_cloned.iter().max_by_key(|entry| entry.1) else { todo!() };
-        println!("\n#{} The pair with the maximum frequency is ({:?}) with frequency {}\n", i, best_pair, best_pair_freq);
+        {
+            let cur_pairs_stats = mux_pairs_stats.lock().unwrap();
+            cur_len = cur_pairs_stats.len() as i32;
+            debug!("#{} the length of cur_pairs_stats before merge: {}", i, cur_pairs_stats.len());
+
+            let start = Instant::now();
+            let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by_key(|entry| entry.1) else { todo!() };
+            debug!("#{} Execution of time find max pair: {:?}", i, start.elapsed());
+
+            best_pair = local_best_pair.clone();
+            best_pair_freq = local_best_pair_freq.clone();
+        }
+        debug!("#{} The pair with the maximum frequency is ({:?}) with frequency {}", i, best_pair, best_pair_freq);
     
         let start = Instant::now();
-        // merge_vocab_parallel(&mut vocab, best_pair, -1);
-        mux_pairs_stats = Arc::new(Mutex::new(cur_pairs_stats.clone()));
-        merge_and_stats(&mut vocab, mux_pairs_stats.clone(), &best_pair, -1);
-        debug!("#{} Execution time of merge_and_stats: {:?}", i, start.elapsed());
-        cur_pairs_stats = (*mux_pairs_stats.lock().unwrap()).clone();
+        merge_and_stats(&mut vocab, &mux_pairs_stats, &best_pair, -1);
+        let cur_pairs_stats = mux_pairs_stats.lock().unwrap();
+        let delta_len = (cur_pairs_stats.len() as i32) - cur_len;
+        let elapsed = start.elapsed();
         debug!("#{} the length of cur_pairs_stats after merge: {}", i, cur_pairs_stats.len());
+        debug!("#{} Execution time of merge_and_stats: {:?}, increase: {:?}, speed: {:.4}ms/pair", i, elapsed, delta_len, (elapsed.as_millis() as f64)/(delta_len as f64));
 
         *learned_tokens.entry(best_pair.0.clone() + &best_pair.1).or_insert(0) = best_pair_freq.clone();
+
+        let loop_elapsed = loop_start.elapsed();
+        let speed = (loop_elapsed.as_millis() as f64)/((i+1) as f64);
+        debug!("#{} Time used up to now: {:?}, {:.4}ms/iter, {:.4}iter(s)/sec", i, loop_elapsed, speed, 1000.0/speed); 
     }
 
     let start = Instant::now();
     save_learned(&vocab, &learned_tokens, learned_path);
-    info!("\nExecution time of save_learned: {:?}\n", start.elapsed());
+    info!("\nExecution time of save_learned model to {:?}: {:?}\n", learned_path, start.elapsed());
+
     Ok(())
 }
 
@@ -430,6 +452,6 @@ fn main() {
     setup_logging().expect("Failed to initialize logging.");
     let (vocab_path, learned_path) = get_files_path();
     info!("vocab path is: {:?},  learned_path: {:?}", vocab_path, learned_path);
-    bpe_learn(&vocab_path, &learned_path, 3000);
+    bpe_learn(&vocab_path, &learned_path, 37000);
 }
 
