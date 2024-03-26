@@ -11,10 +11,10 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use dirs;
 use std::time::Instant;
-use std::sync::Mutex;
 use std::hash::Hash;
 use num_cpus;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::{Arc, Mutex};
 
 
 #[derive(Debug)]
@@ -80,20 +80,6 @@ fn read_vocab<P: AsRef<Path>>(vocab_fname: P, first_n: isize) -> io::Result<Hash
 }
 
 
-/*
-fn get_stats(vocab: &HashMap<String, u32>) -> HashMap<(String, String), u32> {
-    let mut pairs = HashMap::new();
-    for (word, freq) in vocab.iter() {
-        let symbols: Vec<&str> = word.split_whitespace().collect();
-        for window in symbols.windows(2) {
-            let pair = (window[0].to_string(), window[1].to_string());
-            *pairs.entry(pair).or_insert(0) += freq;
-        }
-    }
-    pairs
-}
- */
-
 fn get_pairs_stats_naive(vocab: &HashMap<String, VocabEntry>) -> HashMap<(String, String), i32> {
     let fn_start = Instant::now();
     let mut pairs_stats = HashMap::new();
@@ -113,6 +99,7 @@ fn get_pairs_stats_naive(vocab: &HashMap<String, VocabEntry>) -> HashMap<(String
     pairs_stats
 }
 
+/*
 fn get_pairs_stats_parallel(vocab: &HashMap<String, VocabEntry>) -> HashMap<(String, String), i32> {
     let pairs_stats = Mutex::new(HashMap::new());
 
@@ -139,6 +126,7 @@ fn get_pairs_stats_parallel(vocab: &HashMap<String, VocabEntry>) -> HashMap<(Str
 
     locked_map
 }
+ */
 
 
 fn get_pairs_stats_chunk(vocab: &HashMap<String, VocabEntry>, n_jobs: isize) -> HashMap<(String, String), i32> {
@@ -193,24 +181,63 @@ fn init_alphabet(vocab: &HashMap<String, VocabEntry>) -> HashMap<String, i32> {
     alphabet_freq
 }
 
-fn merge_vocab(vocab: &mut HashMap<String, VocabEntry>, best_pair: &(String, String)) {
-    let new_unit = best_pair.0.clone() + &best_pair.1; // Join the best_pair into a new String
+fn merge_and_stats(vocab: &mut HashMap<String, VocabEntry>, 
+                   pairs_stats: Arc<Mutex<HashMap<(String, String), i32>>>, 
+                   best_pair: &(String, String),
+                   n_jobs: isize) {
 
-    for entry in vocab.values_mut() {
-        let mut idx_to_remove = vec![];
-        for window in entry.units.windows(2).enumerate() {
-            let (idx, pair) = window;
-            if &pair[0] == &best_pair.0 && &pair[1] == &best_pair.1 {
-                idx_to_remove.push(idx);
-            }
-        }
+    let new_unit = best_pair.0.clone() + &best_pair.1;
 
-        for &idx in idx_to_remove.iter().rev() {
-            entry.units.remove(idx); // Remove the element at idx
-            entry.units.remove(idx); // idx now points to the next element, which was originally at idx+1
-            entry.units.insert(idx, new_unit.clone()); // Insert new_unit at position idx
-        }
+    {
+        let mut ps = pairs_stats.lock().unwrap();
+        println!("In merge_and_stats, length: {}", ps.len());
+    
     }
+
+    let n_jobs = if n_jobs == -1 { num_cpus::get() } else { n_jobs as usize };
+    let pool = ThreadPoolBuilder::new().num_threads(20) // Set the desired number of threads
+        .build()
+        .unwrap();
+
+    pool.install(|| {
+        vocab.par_iter_mut().for_each(|(_word, entry)| {
+            let mut i = 0;
+
+            while i < entry.units.len()-1 {
+                if &entry.units[i] == &best_pair.0 && &entry.units[i+1] == &best_pair.1 {
+                    entry.units[i] = new_unit.clone();
+                    entry.units.remove(i+1);
+
+                    { 
+                        let mut ps = pairs_stats.lock().unwrap();
+                        if i>= 1 {
+                            let k1 = (entry.units[i-1].clone(), best_pair.0.clone());
+                            // println!("derease key {:?} from stats", k1);
+                            *ps.entry(k1.clone()).or_insert(0) -= entry.freq;
+                            if *ps.entry(k1.clone()).or_insert(0) == 0 {
+                                ps.remove(&k1);
+                            }
+                            let k2 = (entry.units[i-1].clone(), new_unit.clone());
+                            *ps.entry(k2).or_insert(0) += entry.freq;
+                        }
+                        if i < entry.units.len() - 1 {
+                            let k1 = (best_pair.1.clone(), entry.units[i+1].clone());
+                            *ps.entry(k1.clone()).or_insert(0) -= entry.freq;
+                            // println!("derease key {:?} from stats", k1);
+                            if *ps.entry(k1.clone()).or_insert(0) == 0 {
+                                ps.remove(&k1);
+                            }
+                            let k2 = (new_unit.clone(), entry.units[i+1].clone());
+                            *ps.entry(k2).or_insert(0) += entry.freq;
+                        }
+                    }
+                }
+                i += 1;
+            }
+        });
+    });
+    let mut ps = pairs_stats.lock().unwrap();
+    ps.remove(best_pair);
 }
 
 fn merge_vocab_parallel(vocab: &mut HashMap<String, VocabEntry>, best_pair: &(String, String), n_jobs: isize) {
@@ -221,27 +248,6 @@ fn merge_vocab_parallel(vocab: &mut HashMap<String, VocabEntry>, best_pair: &(St
         .build()
         .unwrap();
 
-    /*
-    pool.install(|| {
-        vocab.par_iter_mut().for_each(|(_word, entry)| {
-            let mut idx_to_remove = vec![];
-            for (idx, window) in entry.units.windows(2).enumerate() {
-                if window.len() == 2 && &window[0] == &best_pair.0 && &window[1] == &best_pair.1 {
-                    idx_to_remove.push(idx);
-                }
-            }
-
-            for &idx in idx_to_remove.iter().rev() {
-                entry.units.remove(idx); // Remove the element at idx
-                // Corrected to prevent panic from removing a non-existent element
-                if idx < entry.units.len() {
-                    entry.units.remove(idx); // Note: This second remove may not be needed; see explanation below.
-                }
-                entry.units.insert(idx, new_unit.clone()); // Insert new_unit at position idx
-            }
-        });
-    });
-     */
     pool.install(|| {
         vocab.par_iter_mut().for_each(|(_word, entry)| {
             let mut i = 0;
@@ -354,18 +360,34 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos:>7}/{len:7} ({per_sec}, {eta_precise})")
         .progress_chars("#>-"));
 
+    let start = Instant::now();
+    let pairs_stats = get_pairs_stats_chunk(&vocab, -1);
+    debug!("Execution time of get_pairs_stats_chunk: {:?}", start.elapsed());
+    debug!("the initial length of pairs_stats: {}", pairs_stats.len());
+
+    //let start = Instant::now();
+    //let mux_pairs_stats = Arc::new(Mutex::new(pairs_stats));
+    //debug!("Execution time of create pairs_stats_mux: {:?}", start.elapsed());
+
+    let mut cur_pairs_stats = pairs_stats.clone();
+    let mut mux_pairs_stats = Arc::new(Mutex::new(HashMap::<(String, String), i32>::new())); 
+
     for i in 0..n_rounds {
-        bar.inc(1);
+        // bar.inc(1);
         let start = Instant::now();
-        let pairs_stats = get_pairs_stats_chunk(&vocab, -1);
-        // debug!("Execution time of get_pairs_stats_chunk: {:?}", start.elapsed());
+        debug!("#{} the length of cur_pairs_stats: {}", i, cur_pairs_stats.len());
     
-        let Some((best_pair, best_pair_freq)) = pairs_stats.iter().max_by_key(|entry| entry.1) else { todo!() };
-        // println!("\n#{} The pair with the maximum frequency is ({:?}) with frequency {}\n", i, best_pair, best_pair_freq);
+        let cur_pairs_stats_cloned = cur_pairs_stats.clone();
+        let Some((best_pair, best_pair_freq)) = cur_pairs_stats_cloned.iter().max_by_key(|entry| entry.1) else { todo!() };
+        println!("\n#{} The pair with the maximum frequency is ({:?}) with frequency {}\n", i, best_pair, best_pair_freq);
     
         let start = Instant::now();
-        merge_vocab_parallel(&mut vocab, best_pair, -1);
-        // debug!("Execution time of merge_vocab: {:?}", start.elapsed());
+        // merge_vocab_parallel(&mut vocab, best_pair, -1);
+        mux_pairs_stats = Arc::new(Mutex::new(cur_pairs_stats.clone()));
+        merge_and_stats(&mut vocab, mux_pairs_stats.clone(), &best_pair, -1);
+        debug!("#{} Execution time of merge_and_stats: {:?}", i, start.elapsed());
+        cur_pairs_stats = (*mux_pairs_stats.lock().unwrap()).clone();
+        debug!("#{} the length of cur_pairs_stats after merge: {}", i, cur_pairs_stats.len());
 
         *learned_tokens.entry(best_pair.0.clone() + &best_pair.1).or_insert(0) = best_pair_freq.clone();
     }
@@ -408,6 +430,6 @@ fn main() {
     setup_logging().expect("Failed to initialize logging.");
     let (vocab_path, learned_path) = get_files_path();
     info!("vocab path is: {:?},  learned_path: {:?}", vocab_path, learned_path);
-    bpe_learn(&vocab_path, &learned_path, 37000);
+    bpe_learn(&vocab_path, &learned_path, 3000);
 }
 
