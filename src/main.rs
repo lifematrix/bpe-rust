@@ -15,6 +15,7 @@ use std::hash::Hash;
 use num_cpus;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::{Arc, Mutex};
+use std::cmp::Ordering;
 
 
 #[derive(Debug)]
@@ -99,35 +100,6 @@ fn get_pairs_stats_naive(vocab: &HashMap<String, VocabEntry>) -> HashMap<(String
     pairs_stats
 }
 
-/*
-fn get_pairs_stats_parallel(vocab: &HashMap<String, VocabEntry>) -> HashMap<(String, String), i32> {
-    let pairs_stats = Mutex::new(HashMap::new());
-
-    vocab.par_iter().for_each(|(_key, entry)| {
-        let mut local_map = HashMap::new();
-        for window in entry.units.windows(2) {
-            if window.len() == 2 {
-                let pair = (window[0].clone(), window[1].clone());
-                *local_map.entry(pair).or_insert(0) += entry.freq;
-            }
-        }
-
-        let start = Instant::now();
-        let mut global_map = pairs_stats.lock().unwrap();
-        for (pair, freq) in local_map {
-            *global_map.entry(pair).or_insert(0) += freq;
-        }
-        println!("combine into global map {:?}", start.elapsed());
-    });
-
-    let start = Instant::now();
-    let locked_map = pairs_stats.into_inner().unwrap();
-    println!("into_inner().unwrap() {:?}", start.elapsed());
-
-    locked_map
-}
- */
-
 
 fn get_pairs_stats_chunk(vocab: &HashMap<String, VocabEntry>, n_jobs: isize) -> HashMap<(String, String), i32> {
     // Adjust n_jobs based on the available cores if n_jobs is -1
@@ -187,14 +159,6 @@ fn merge_and_stats(vocab: &mut HashMap<String, VocabEntry>,
                    n_jobs: isize) {
 
     let new_unit = best_pair.0.clone() + &best_pair.1;
-
-    /*
-    {
-        let mut ps = pairs_stats.lock().unwrap();
-        println!("In merge_and_stats, length: {}", ps.len());
-    
-    }
-     */
 
     let n_jobs = if n_jobs == -1 { num_cpus::get() } else { n_jobs as usize };
     let pool = ThreadPoolBuilder::new().num_threads(20) // Set the desired number of threads
@@ -268,6 +232,22 @@ fn merge_vocab_parallel(vocab: &mut HashMap<String, VocabEntry>, best_pair: &(St
     });
 }
 
+
+/*
+            let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by(|x, y| {
+                    x.1.cmp(&y.1) // Compare values in descending order
+                    .then_with(|| (x.0 .0.len() + x.0 .1.len()).cmp(&(y.0 .0.len() + y.0 .1.len()))) // Then compare key lengths
+                    .then_with(|| x.0 .0.cmp(&y.0 .0).reverse()) // Then compare the first part of the key in ascending alphabetical order
+                    .then_with(|| x.0 .1.cmp(&y.0 .1).reverse()) // Finally, compare the second part of the key in ascending alphabetical order if needed
+ */                                                                //
+
+fn cmp_pair(a: (&(String, String), &i32), b: (&(String, String), &i32)) -> Ordering {
+    a.1.cmp(&b.1) // Compare values in descending order
+        .then_with(|| (a.0 .0.len() + b.0 .1.len()).cmp(&(a.0 .0.len() + b.0 .1.len()))) // Then compare key lengths
+        .then_with(|| a.0 .0.cmp(&b.0 .0).reverse()) // Then compare the first part of the key in ascending alphabetical order
+        .then_with(|| a.0 .1.cmp(&b.0 .1).reverse()) // Finally, compare the second part of the key in ascending alphabetical order if needed
+}
+
 fn save_learned(vocab: &HashMap<String, VocabEntry>, 
                 learned_tokens: &HashMap<String, i32>, 
                 learned_pairs: &HashMap<(String, String), i32>,
@@ -293,41 +273,15 @@ fn save_learned(vocab: &HashMap<String, VocabEntry>,
     }
 
     // Sort learned_pairs and write its length and elements to the file
-    let mut sorted_pairs: Vec<_> = learned_tokens.iter().collect();
-    sorted_pairs.sort_by_key(|&(_, freq)| freq);
-    writeln!(file, "{}", sorted_tokens.len())?;
-    for (key, &value) in sorted_tokens {
-        writeln!(file, "{} {}", key, value)?;
+    let mut sorted_pairs: Vec<_> = learned_pairs.iter().collect();
+    sorted_pairs.sort_by(|a, b| cmp_pair(*a, *b).reverse());
+    writeln!(file, "{}", sorted_pairs.len())?;
+    for (key, &value) in sorted_pairs {
+        writeln!(file, "{} {} {}", key.0, key.1, value)?;
     }
 
     Ok(())
 }
-/*
-fn merge_vocab(pair: &(String, String), vocab: &HashMap<String, u32>) -> HashMap<String, u32> {
-    let mut new_vocab = HashMap::new();
-    let bigram = pair.0.clone() + " " + &pair.1;
-    let replacement = pair.0.clone() + &pair.1;
-    for (word, freq) in vocab {
-        let new_word = word.replace(&bigram, &replacement);
-        new_vocab.insert(new_word, *freq);
-    }
-    new_vocab
-}
-
-fn bpe(mut vocab: HashMap<String, u32>, num_merges: u32) -> HashSet<String> {
-    for _ in 0..num_merges {
-        let pairs = get_stats(&vocab);
-        if let Some(pair) = pairs.iter().max_by_key(|entry| entry.1) {
-            vocab = merge_vocab(&pair.0, &vocab);
-        }
-    }
-    let mut tokens = HashSet::new();
-    for word in vocab.keys() {
-        word.split_whitespace().for_each(|token| { tokens.insert(token.to_string()); });
-    }
-    tokens
-}
-*/
 
 fn get_files_path() -> (String, String) {
     let vocab_file = "proj/lifematrix/TransformerLM/data/generated/WMT-14/vocab.en";
@@ -388,6 +342,7 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
     let mut best_pair_freq: i32;
     let mut cur_len: i32;
     let mux_pairs_stats = Arc::new(Mutex::new(pairs_stats));
+    let mut learned_pairs: HashMap<(String, String), i32> = HashMap::new();
 
     let loop_start = Instant::now();
     for i in 0..n_rounds {
@@ -401,12 +356,16 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
 
             let start = Instant::now();
             // let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by_key(|entry| entry.1) else { todo!() };
+            /*
             let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by(|x, y| {
                     x.1.cmp(&y.1) // Compare values in descending order
                     .then_with(|| (x.0 .0.len() + x.0 .1.len()).cmp(&(y.0 .0.len() + y.0 .1.len()))) // Then compare key lengths
                     .then_with(|| x.0 .0.cmp(&y.0 .0).reverse()) // Then compare the first part of the key in ascending alphabetical order
                     .then_with(|| x.0 .1.cmp(&y.0 .1).reverse()) // Finally, compare the second part of the key in ascending alphabetical order if needed
             }) else { todo!{} };
+             */
+            let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by(|a, b| cmp_pair(*a, *b)) else { todo!{} };
+
             debug!("#{} Execution of time find max pair: {:?}", i, start.elapsed());
 
             best_pair = local_best_pair.clone();
@@ -423,6 +382,7 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
         debug!("#{} Execution time of merge_and_stats: {:?}, increase: {:?}, speed: {:.4}ms/pair", i, elapsed, delta_len, (elapsed.as_millis() as f64)/(delta_len as f64));
 
         *learned_tokens.entry(best_pair.0.clone() + &best_pair.1).or_insert(0) = best_pair_freq.clone();
+        *learned_pairs.entry(best_pair.clone()).or_insert(0) = best_pair_freq.clone();
 
         let loop_elapsed = loop_start.elapsed();
         let speed = (loop_elapsed.as_millis() as f64)/((i+1) as f64);
@@ -430,7 +390,7 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
     }
 
     let start = Instant::now();
-    save_learned(&vocab, &learned_tokens, learned_path);
+    save_learned(&vocab, &learned_tokens, &learned_pairs, learned_path);
     info!("\nExecution time of save_learned model to {:?}: {:?}\n", learned_path, start.elapsed());
 
     Ok(())
