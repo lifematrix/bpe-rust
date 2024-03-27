@@ -268,8 +268,10 @@ fn merge_vocab_parallel(vocab: &mut HashMap<String, VocabEntry>, best_pair: &(St
     });
 }
 
-fn save_learned( vocab: &HashMap<String, VocabEntry>, learned_tokens: &HashMap<String, i32>, 
-            learned_path: &String) -> io::Result<()> {
+fn save_learned(vocab: &HashMap<String, VocabEntry>, 
+                learned_tokens: &HashMap<String, i32>, 
+                learned_pairs: &HashMap<(String, String), i32>,
+                learned_path: &String) -> io::Result<()> {
     let path = Path::new(learned_path);
     let mut file = File::create(path)?;
 
@@ -285,6 +287,14 @@ fn save_learned( vocab: &HashMap<String, VocabEntry>, learned_tokens: &HashMap<S
     // Sort learned_tokens and write its length and elements to the file
     let mut sorted_tokens: Vec<_> = learned_tokens.iter().collect();
     sorted_tokens.sort_by_key(|&(k, _)| k);
+    writeln!(file, "{}", sorted_tokens.len())?;
+    for (key, &value) in sorted_tokens {
+        writeln!(file, "{} {}", key, value)?;
+    }
+
+    // Sort learned_pairs and write its length and elements to the file
+    let mut sorted_pairs: Vec<_> = learned_tokens.iter().collect();
+    sorted_pairs.sort_by_key(|&(_, freq)| freq);
     writeln!(file, "{}", sorted_tokens.len())?;
     for (key, &value) in sorted_tokens {
         writeln!(file, "{} {}", key, value)?;
