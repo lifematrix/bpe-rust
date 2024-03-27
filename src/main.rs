@@ -458,6 +458,6 @@ fn main() {
     setup_logging().expect("Failed to initialize logging.");
     let (vocab_path, learned_path) = get_files_path();
     info!("vocab path is: {:?},  learned_path: {:?}", vocab_path, learned_path);
-    bpe_learn(&vocab_path, &learned_path, 3000);
+    bpe_learn(&vocab_path, &learned_path, 37000);
 }
 
