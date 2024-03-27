@@ -390,7 +390,13 @@ fn bpe_learn(vocab_path: &String, learned_path: &String, max_size: i32) -> io::R
             debug!("#{} the length of cur_pairs_stats before merge: {}", i, cur_pairs_stats.len());
 
             let start = Instant::now();
-            let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by_key(|entry| entry.1) else { todo!() };
+            // let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by_key(|entry| entry.1) else { todo!() };
+            let Some((local_best_pair, local_best_pair_freq)) = cur_pairs_stats.iter().max_by(|x, y| {
+                    x.1.cmp(&y.1) // Compare values in descending order
+                    .then_with(|| (x.0 .0.len() + x.0 .1.len()).cmp(&(y.0 .0.len() + y.0 .1.len()))) // Then compare key lengths
+                    .then_with(|| x.0 .0.cmp(&y.0 .0).reverse()) // Then compare the first part of the key in ascending alphabetical order
+                    .then_with(|| x.0 .1.cmp(&y.0 .1).reverse()) // Finally, compare the second part of the key in ascending alphabetical order if needed
+            }) else { todo!{} };
             debug!("#{} Execution of time find max pair: {:?}", i, start.elapsed());
 
             best_pair = local_best_pair.clone();
@@ -452,6 +458,6 @@ fn main() {
     setup_logging().expect("Failed to initialize logging.");
     let (vocab_path, learned_path) = get_files_path();
     info!("vocab path is: {:?},  learned_path: {:?}", vocab_path, learned_path);
-    bpe_learn(&vocab_path, &learned_path, 37000);
+    bpe_learn(&vocab_path, &learned_path, 3000);
 }
 
